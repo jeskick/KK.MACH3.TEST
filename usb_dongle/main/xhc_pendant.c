@@ -32,7 +32,7 @@
 #define FEED_0_01 0x0E
 #define REPORT_IN 0x04
 #define REPORT_FEATURE 0x06
-#define FRAME_LEN 21
+#define FRAME_LEN 32
 
 static const char *TAG = "xhc";
 
@@ -103,6 +103,7 @@ static uint8_t host_seed;
 static uint32_t frame_count;
 static uint32_t reports_sent;
 static float last_x, last_y, last_z;
+static float last_mx, last_my, last_mz;
 static uint16_t last_feed, last_spindle;
 static bool have_last;
 
@@ -173,6 +174,9 @@ typedef struct __attribute__((packed)) {
     int32_t z;
     uint16_t feed;
     uint16_t spindle;
+    int32_t mx;
+    int32_t my;
+    int32_t mz;
 } link_pkt_t;
 
 static uint32_t now_ms(void)
@@ -223,6 +227,9 @@ static void link_send(void)
         .z = (int32_t)(last_z * 10000.0f),
         .feed = last_feed,
         .spindle = last_spindle,
+        .mx = (int32_t)(last_mx * 10000.0f),
+        .my = (int32_t)(last_my * 10000.0f),
+        .mz = (int32_t)(last_mz * 10000.0f),
     };
     uint8_t mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     esp_now_send(mac, (const uint8_t *)&pkt, sizeof(pkt));
@@ -275,15 +282,19 @@ static float coordinate(const uint8_t *p)
 static void decode_frame(const uint8_t *p)
 {
     host_seed = p[2];
-    uint8_t flags = p[3];
     float x = coordinate(p + 4);
     float y = coordinate(p + 8);
     float z = coordinate(p + 12);
     uint16_t feed = (uint16_t)(p[16] | (p[17] << 8));
     uint16_t spindle = (uint16_t)(p[18] | (p[19] << 8));
+    float mx = coordinate(p + 20);
+    float my = coordinate(p + 24);
+    float mz = coordinate(p + 28);
     frame_count++;
 
-    bool changed = !have_last || x != last_x || y != last_y || z != last_z || feed != last_feed || spindle != last_spindle;
+    bool changed = !have_last || x != last_x || y != last_y || z != last_z ||
+                   mx != last_mx || my != last_my || mz != last_mz ||
+                   feed != last_feed || spindle != last_spindle;
     if (!changed && (frame_count % 20) != 0) {
         return;
     }
@@ -291,11 +302,14 @@ static void decode_frame(const uint8_t *p)
     last_x = x;
     last_y = y;
     last_z = z;
+    last_mx = mx;
+    last_my = my;
+    last_mz = mz;
     last_feed = feed;
     last_spindle = spindle;
 
-    ESP_LOGI(TAG, "Mach3 %s  X %8.4f  Y %8.4f  Z %8.4f  F %u  S %u  flags 0x%02X  frame %lu",
-             (flags & 0x80) ? "工件坐标" : "机械坐标", x, y, z, feed, spindle, flags, (unsigned long)frame_count);
+    ESP_LOGI(TAG, "工件 X %8.4f Y %8.4f Z %8.4f  机械 X %8.4f Y %8.4f Z %8.4f  F %u S %u",
+             x, y, z, mx, my, mz, feed, spindle);
 }
 
 static void consume_host_bytes(const uint8_t *data, uint16_t len)
@@ -327,6 +341,18 @@ static void consume_host_bytes(const uint8_t *data, uint16_t len)
                 frame_len = (uint8_t)(frame_len - start);
             }
             return;
+        }
+        int inner = -1;
+        for (int j = start + 2; j + 1 < start + FRAME_LEN; j++) {
+            if (frame[j] == 0xFE && frame[j + 1] == 0xFD) {
+                inner = j;
+                break;
+            }
+        }
+        if (inner >= 0) {
+            memmove(frame, frame + inner, frame_len - inner);
+            frame_len = (uint8_t)(frame_len - inner);
+            continue;
         }
         decode_frame(frame + start);
         uint8_t rest = (uint8_t)(frame_len - (start + FRAME_LEN));

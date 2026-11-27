@@ -58,12 +58,16 @@ typedef struct __attribute__((packed)) {
     int32_t z;
     uint16_t feed;
     uint16_t spindle;
+    int32_t mx;
+    int32_t my;
+    int32_t mz;
 } link_pkt_t;
 
 static link_pkt_t link_rx;
 static volatile bool link_rx_new;
 
 static float coord_x, coord_y, coord_z;
+static float coord_mx, coord_my, coord_mz;
 static int feed, spindle;
 static int32_t encoder;
 static uint8_t enc_prev;
@@ -454,7 +458,7 @@ static void status_bar(bool up)
 {
     uint16_t bg = up ? 0x07E0 : 0xF800;
     uint16_t fg = up ? 0x0000 : 0xFFFF;
-    draw_band(0, 44, up ? "LINK OK" : "NO LINK", 7, 32, 32, fg, bg, true);
+    draw_band(0, 20, up ? "LINK OK" : "NO LINK", 7, 24, 16, fg, bg, true);
 }
 
 static void fmt_coord(char *dst, size_t n, char axis, float v)
@@ -474,7 +478,7 @@ void app_main(void)
     link_start();
     ESP_LOGI(TAG, "屏幕已初始化 %dx%d", LCD_W, LCD_H);
 
-    char prev[8][24];
+    char prev[11][24];
     memset(prev, 0, sizeof(prev));
     int shown_link = -1;
     uint32_t ticks = 0;
@@ -506,6 +510,9 @@ void app_main(void)
                 coord_x = pkt.x / 10000.0f;
                 coord_y = pkt.y / 10000.0f;
                 coord_z = pkt.z / 10000.0f;
+                coord_mx = pkt.mx / 10000.0f;
+                coord_my = pkt.my / 10000.0f;
+                coord_mz = pkt.mz / 10000.0f;
                 feed = pkt.feed;
                 spindle = pkt.spindle;
             }
@@ -521,30 +528,36 @@ void app_main(void)
         }
         rgb_show(link_up, mach3_ok, blink_on);
 
-        char row[8][24];
+        char row[11][24];
         fmt_coord(row[0], sizeof(row[0]), 'X', coord_x);
-        fmt_coord(row[1], sizeof(row[1]), 'Y', coord_y);
-        fmt_coord(row[2], sizeof(row[2]), 'Z', coord_z);
-        snprintf(row[3], sizeof(row[3]), "F%6d S%6d", feed, spindle);
-        snprintf(row[4], sizeof(row[4]), "AXIS %s", ctrl_axis_name);
-        snprintf(row[5], sizeof(row[5]), "STEP %s", ctrl_step_name);
-        snprintf(row[6], sizeof(row[6]), "BTN %s", ctrl_btn_name);
-        snprintf(row[7], sizeof(row[7]), "ESTOP %s", estop ? "OPEN" : "OK");
+        fmt_coord(row[1], sizeof(row[1]), 'X', coord_mx);
+        fmt_coord(row[2], sizeof(row[2]), 'Y', coord_y);
+        fmt_coord(row[3], sizeof(row[3]), 'Y', coord_my);
+        fmt_coord(row[4], sizeof(row[4]), 'Z', coord_z);
+        fmt_coord(row[5], sizeof(row[5]), 'Z', coord_mz);
+        snprintf(row[6], sizeof(row[6]), "F%6d S%6d", feed, spindle);
+        snprintf(row[7], sizeof(row[7]), "AXIS %s", ctrl_axis_name);
+        snprintf(row[8], sizeof(row[8]), "STEP %s", ctrl_step_name);
+        snprintf(row[9], sizeof(row[9]), "BTN %s", ctrl_btn_name);
+        snprintf(row[10], sizeof(row[10]), "ESTOP %s", estop ? "OPEN" : "OK");
 
-        const uint16_t color[8] = {
-            0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF,
+        const uint16_t color[11] = {
+            0x07E0, 0xF800, 0x07E0, 0xF800, 0x07E0, 0xF800,
+            0xFFFF,
             0x07FF, 0x07FF, ctrl_btn ? 0xFFE0 : 0xFFFF,
             estop ? 0xF800 : 0x07E0,
         };
-        /* 44 + 36*3 + 32 + 34*4 = 320. 字宽按列数铺满 240. */
-        static const int band_y[8] = {44, 80, 116, 152, 184, 218, 252, 286};
-        static const int band_h[8] = {36, 36, 36, 32, 34, 34, 34, 34};
-        static const int band_cols[8] = {15, 15, 15, 15, 10, 10, 10, 10};
-        static const int band_cw[8] = {16, 16, 16, 16, 24, 24, 24, 24};
-        static const int band_ch[8] = {24, 24, 24, 16, 24, 24, 24, 24};
-        static const bool band_center[8] = {false, false, false, false, true, true, true, true};
-        static uint16_t prev_fg[8];
-        for (int i = 0; i < 8; i++) {
+        /* 20 + (28+18)*3 + 32*4 + 34 = 320. 工件绿、大字；机械红、小一号。 */
+        static const int band_y[11] = {20, 48, 66, 94, 112, 140, 158, 190, 222, 254, 286};
+        static const int band_h[11] = {28, 18, 28, 18, 28, 18, 32, 32, 32, 32, 34};
+        static const int band_cols[11] = {15, 15, 15, 15, 15, 15, 15, 10, 10, 10, 10};
+        static const int band_cw[11] = {16, 16, 16, 16, 16, 16, 16, 24, 24, 24, 24};
+        static const int band_ch[11] = {24, 16, 24, 16, 24, 16, 16, 24, 24, 24, 24};
+        static const bool band_center[11] = {
+            false, false, false, false, false, false, false, true, true, true, true,
+        };
+        static uint16_t prev_fg[11];
+        for (int i = 0; i < 11; i++) {
             if (strcmp(prev[i], row[i]) != 0 || prev_fg[i] != color[i]) {
                 draw_band(band_y[i], band_h[i], row[i], band_cols[i], band_cw[i], band_ch[i],
                           color[i], 0x0000, band_center[i]);
