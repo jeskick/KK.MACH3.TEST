@@ -36,6 +36,7 @@
 #define LINK_CHANNEL 6
 
 static esp_lcd_panel_handle_t panel;
+static esp_lcd_panel_io_handle_t lcd_io;
 static uint16_t line_buf[LCD_W * 32];
 static bool link_ready;
 static uint8_t link_seq;
@@ -73,6 +74,13 @@ static const int8_t enc_table[16] = {
     0, 1, -1, 0,
 };
 
+static void lcd_flush(void)
+{
+    if (lcd_io != NULL) {
+        esp_lcd_panel_io_tx_param(lcd_io, 0x00, NULL, 0);
+    }
+}
+
 static void lcd_fill(uint16_t color)
 {
     for (int i = 0; i < LCD_W; i++) {
@@ -85,6 +93,7 @@ static void lcd_fill(uint16_t color)
 
 static void draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg, int scale)
 {
+    lcd_flush();
     const int tw = (int)strlen(text) * 8 * scale;
     const int th = 8 * scale;
     if (tw <= 0 || x >= LCD_W || y >= LCD_H) {
@@ -122,6 +131,7 @@ static void draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg, 
         }
     }
     esp_lcd_panel_draw_bitmap(panel, x, y, x + width, y + th, line_buf);
+    lcd_flush();
 }
 
 static void lcd_start(void)
@@ -143,24 +153,23 @@ static void lcd_start(void)
     };
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_DISABLED));
 
-    esp_lcd_panel_io_handle_t io = NULL;
     esp_lcd_panel_io_spi_config_t io_cfg = {
         .cs_gpio_num = PIN_LCD_CS,
         .dc_gpio_num = PIN_LCD_DC,
         .spi_mode = 0,
         .pclk_hz = 16 * 1000 * 1000,
-        .trans_queue_depth = 1,
+        .trans_queue_depth = 4,
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
     };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI2_HOST, &io_cfg, &io));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI2_HOST, &io_cfg, &lcd_io));
 
     esp_lcd_panel_dev_config_t cfg = {
         .reset_gpio_num = PIN_LCD_RST,
         .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
         .bits_per_pixel = 16,
     };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(io, &cfg, &panel));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(lcd_io, &cfg, &panel));
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel));
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel, true));
@@ -324,20 +333,20 @@ static void rgb_show(bool up, bool mach3, bool blink_on)
     }
 }
 
-static void status_bar(bool up, bool blink_on)
+static void status_bar(bool up)
 {
-    uint16_t bg = up ? 0x07E0 : (blink_on ? 0xF800 : 0x0000);
+    uint16_t bg = up ? 0x07E0 : 0xF800;
     uint16_t fg = up ? 0x0000 : 0xFFFF;
     const char *text = up ? "LINK OK" : "NO LINK";
     const int scale = 3;
     int tw = (int)strlen(text) * 8 * scale;
     int x = (LCD_W - tw) / 2;
-    for (int i = 0; i < LCD_W; i++) {
+    lcd_flush();
+    for (int i = 0; i < LCD_W * 32; i++) {
         line_buf[i] = bg;
     }
-    for (int row = 0; row < 32; row++) {
-        esp_lcd_panel_draw_bitmap(panel, 0, row, LCD_W, row + 1, line_buf);
-    }
+    esp_lcd_panel_draw_bitmap(panel, 0, 0, LCD_W, 32, line_buf);
+    lcd_flush();
     draw_text(x, 4, text, fg, bg, scale);
 }
 
@@ -359,6 +368,7 @@ void app_main(void)
 
     char prev[14][20];
     memset(prev, 0, sizeof(prev));
+    int shown_link = -1;
     uint32_t ticks = 0;
 
     while (1) {
@@ -406,7 +416,11 @@ void app_main(void)
         keys[6] = '\0';
 
         bool blink_on = ((ticks / 10) % 2) == 0;
-        status_bar(link_up, blink_on);
+        if (shown_link != (int)link_up) {
+            status_bar(link_up);
+            shown_link = (int)link_up;
+            memset(prev, 0, sizeof(prev));
+        }
         rgb_show(link_up, mach3_ok, blink_on);
 
         char row[12][20];
