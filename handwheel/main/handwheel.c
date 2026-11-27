@@ -74,7 +74,7 @@ static void draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg)
         for (int row = 0; row < 8; row++) {
             uint8_t bits = glyph[row];
             for (int col = 0; col < 8; col++) {
-                if ((bits & (0x80 >> col)) == 0) {
+                if ((bits & (0x01 << col)) == 0) {
                     continue;
                 }
                 for (int sy = 0; sy < scale; sy++) {
@@ -132,7 +132,6 @@ static void lcd_start(void)
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel));
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel, true));
-    ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel, true, false));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
     lcd_fill(0x0000);
 }
