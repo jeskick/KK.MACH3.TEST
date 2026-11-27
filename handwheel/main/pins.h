@@ -40,5 +40,8 @@
 /* 急停，常闭触点接 GND。闭合为低；按下或断线为高。 */
 #define PIN_ESTOP 1
 
-/* 备用：GPIO2。GPIO48 在 DevKitC-1 上是板载 RGB，不分配功能。 */
+/* 板载 RGB（WS2812），状态灯。红闪未连接，黄已连接无坐标，绿正在收坐标。 */
+#define PIN_RGB 48
+
+/* 备用：GPIO2。 */
 /* 保留：USB GPIO19/20，UART0 TX GPIO43 / RX GPIO44。 */

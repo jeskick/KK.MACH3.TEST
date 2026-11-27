@@ -11,6 +11,8 @@
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "driver/rmt_encoder.h"
+#include "driver/rmt_tx.h"
 #include "driver/spi_master.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
@@ -281,6 +283,47 @@ static void link_start(void)
     ESP_LOGI(TAG, "link channel %d", LINK_CHANNEL);
 }
 
+static rmt_channel_handle_t rgb_chan;
+static rmt_encoder_handle_t rgb_enc;
+
+static void rgb_start(void)
+{
+    rmt_tx_channel_config_t tx_cfg = {
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .gpio_num = PIN_RGB,
+        .mem_block_symbols = 64,
+        .resolution_hz = 10 * 1000 * 1000,
+        .trans_queue_depth = 4,
+    };
+    ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_cfg, &rgb_chan));
+    rmt_bytes_encoder_config_t enc = {
+        .bit0 = {.level0 = 1, .duration0 = 4, .level1 = 0, .duration1 = 8},
+        .bit1 = {.level0 = 1, .duration0 = 8, .level1 = 0, .duration1 = 4},
+        .flags.msb_first = 1,
+    };
+    ESP_ERROR_CHECK(rmt_new_bytes_encoder(&enc, &rgb_enc));
+    ESP_ERROR_CHECK(rmt_enable(rgb_chan));
+}
+
+static void rgb_set(uint8_t r, uint8_t g, uint8_t b)
+{
+    uint8_t grb[3] = {g, r, b};
+    rmt_transmit_config_t tx = {0};
+    rmt_tx_wait_all_done(rgb_chan, pdMS_TO_TICKS(20));
+    rmt_transmit(rgb_chan, rgb_enc, grb, sizeof(grb), &tx);
+}
+
+static void rgb_show(bool up, bool mach3, bool blink_on)
+{
+    if (!up) {
+        rgb_set(blink_on ? 48 : 0, 0, 0);
+    } else if (!mach3) {
+        rgb_set(48, 28, 0);
+    } else {
+        rgb_set(0, 48, 0);
+    }
+}
+
 static void status_bar(bool up, bool blink_on)
 {
     uint16_t bg = up ? 0x07E0 : (blink_on ? 0xF800 : 0x0000);
@@ -310,6 +353,7 @@ void app_main(void)
     ESP_LOGI(TAG, "手轮板启动，点亮背光并初始化 ST7789");
     inputs_start();
     lcd_start();
+    rgb_start();
     link_start();
     ESP_LOGI(TAG, "屏幕已初始化 %dx%d", LCD_W, LCD_H);
 
@@ -361,7 +405,9 @@ void app_main(void)
         }
         keys[6] = '\0';
 
-        status_bar(link_up, ((ticks / 10) % 2) == 0);
+        bool blink_on = ((ticks / 10) % 2) == 0;
+        status_bar(link_up, blink_on);
+        rgb_show(link_up, mach3_ok, blink_on);
 
         char row[12][20];
         if (link_rssi < -120) {

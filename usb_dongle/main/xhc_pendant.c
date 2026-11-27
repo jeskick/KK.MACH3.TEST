@@ -13,6 +13,8 @@
 
 #include "class/hid/hid_device.h"
 #include "driver/gpio.h"
+#include "driver/rmt_encoder.h"
+#include "driver/rmt_tx.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -106,6 +108,48 @@ static uint16_t last_feed, last_spindle;
 static bool have_last;
 
 #define LINK_CHANNEL 6
+#define PIN_RGB 48
+
+static rmt_channel_handle_t rgb_chan;
+static rmt_encoder_handle_t rgb_enc;
+
+static void rgb_start(void)
+{
+    rmt_tx_channel_config_t tx_cfg = {
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .gpio_num = PIN_RGB,
+        .mem_block_symbols = 64,
+        .resolution_hz = 10 * 1000 * 1000,
+        .trans_queue_depth = 4,
+    };
+    ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_cfg, &rgb_chan));
+    rmt_bytes_encoder_config_t enc = {
+        .bit0 = {.level0 = 1, .duration0 = 4, .level1 = 0, .duration1 = 8},
+        .bit1 = {.level0 = 1, .duration0 = 8, .level1 = 0, .duration1 = 4},
+        .flags.msb_first = 1,
+    };
+    ESP_ERROR_CHECK(rmt_new_bytes_encoder(&enc, &rgb_enc));
+    ESP_ERROR_CHECK(rmt_enable(rgb_chan));
+}
+
+static void rgb_set(uint8_t r, uint8_t g, uint8_t b)
+{
+    uint8_t grb[3] = {g, r, b};
+    rmt_transmit_config_t tx = {0};
+    rmt_tx_wait_all_done(rgb_chan, pdMS_TO_TICKS(20));
+    rmt_transmit(rgb_chan, rgb_enc, grb, sizeof(grb), &tx);
+}
+
+static void rgb_show(bool up, bool mach3, bool blink_on)
+{
+    if (!up) {
+        rgb_set(blink_on ? 48 : 0, 0, 0);
+    } else if (!mach3) {
+        rgb_set(48, 28, 0);
+    } else {
+        rgb_set(0, 48, 0);
+    }
+}
 static bool link_ready;
 static uint8_t link_seq;
 static volatile uint32_t wheel_packets;
@@ -358,6 +402,7 @@ void app_main(void)
 #endif
     };
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
+    rgb_start();
     link_start();
     ESP_LOGI(TAG, "USB %04X:%04X 已启动，等待 Mach3 回传坐标", USB_VID, USB_PID);
 
@@ -378,6 +423,8 @@ void app_main(void)
         loops++;
         if ((loops % 10) == 0) {
             link_send();
+            bool wheel_up = wheel_packets > 0 && (now_ms() - wheel_last_ms) < 1000;
+            rgb_show(wheel_up, have_last, ((loops / 10) % 2) == 0);
         }
         if ((loops % 50) == 0) {
             bool wheel_up = wheel_packets > 0 && (now_ms() - wheel_last_ms) < 1000;
