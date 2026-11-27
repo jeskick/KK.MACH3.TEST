@@ -132,6 +132,7 @@ static void lcd_start(void)
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel));
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel, true));
+    ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel, true, false));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
     lcd_fill(0x0000);
 }
