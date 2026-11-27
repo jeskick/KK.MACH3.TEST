@@ -1,0 +1,21 @@
+DoButton(24)
+Sleep(1000)
+While IsMoving()
+Sleep(20)
+Wend
+DoButton(22)
+Sleep(1000)
+While IsMoving()
+Sleep(20)
+Wend
+DoButton(23)
+Sleep(1000)
+While IsMoving()
+Sleep(20)
+Wend
+'DoButton(25) 
+'While IsMoving()
+'Sleep(20)
+'Wend
+ 
+ 

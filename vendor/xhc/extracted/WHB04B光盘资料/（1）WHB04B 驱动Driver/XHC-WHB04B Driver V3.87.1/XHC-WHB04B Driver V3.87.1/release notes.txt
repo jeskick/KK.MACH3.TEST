@@ -1,0 +1,44 @@
+
+V3.8 2017.3.3
+1. Release the first version for HB04Bx.
+
+V3.81 2017.3.21
+1. modify the z and c display error
+V3.82 2017.4.20
+1. save the macro key auto
+ 
+V3.83 2017.5.5
+1.release jog step when no wheel data for 5 second.delete the band lead function
+V3.84 2017.7.21
+1.stop the continue move when bandswitch off.
+V3.85.3 2018.11.16
+1.filter reversed data when continue joging
+2.fixed the jog stop when continue joging
+3.
+V3.86.3 2018.11.23
+support lwhb04b 
+
+V3.86.4 2019.1.2
+restore lead function
+V3.86.5 2019.1.16
+modify the macro save function £¬in case of clash with whb04bx
+V3.86.6 2019.5.24
+ modify for compatible with ess card
+solve the acceleration problem with some card
+
+V3.86.7 2019.6.3
+ modify to support Lhb04b
+ note:when press fn and other key,please release fn first then release the other key .in 
+ case of error!
+V3.86.8 2019.6.25
+ 1.modify start/pause key function.solve cannot pause problem in some case.
+2. add macro 9 and macro 10 for macro key
+
+V3.86.9 2020.8.19
+ 1.stop jog move when usb dongle is lost
+ 
+ V3.87.1 2023.7.10
+ 1. solve the new WHB04B cannto startup problem.
+ 
+
+
