@@ -17,7 +17,7 @@
 #define PIN_ENC_A 4
 #define PIN_ENC_B 5
 
-/* 波段开关 A，一刀四段。公共端接 GND，选中为低。建议：X Y Z A。 */
+/* 波段开关 A，一刀四段。公共端接 GND，选中为低。空 X Y Z。 */
 #define PIN_SWA_1 6
 #define PIN_SWA_2 7
 #define PIN_SWA_3 8
@@ -29,13 +29,15 @@
 #define PIN_SWB_3 17
 #define PIN_SWB_4 18
 
-/* 六个按键。按下接 GND，内部上拉，按下为低。 */
+/* 八个按键。按下接 GND，内部上拉，按下为低。 */
 #define PIN_KEY1 38
 #define PIN_KEY2 39
 #define PIN_KEY3 40
 #define PIN_KEY4 41
 #define PIN_KEY5 42
 #define PIN_KEY6 47
+#define PIN_KEY7 2
+#define PIN_KEY8 46
 
 /* 急停，常闭触点接 GND。闭合为低；按下或断线为高。 */
 #define PIN_ESTOP 1
@@ -43,5 +45,5 @@
 /* 板载 RGB（WS2812），状态灯。红闪未连接，黄已连接无坐标，绿正在收坐标。 */
 #define PIN_RGB 48
 
-/* 备用：GPIO2。 */
+/* GPIO46 是启动配置脚。按键 8 不要在上电时按住。 */
 /* 保留：USB GPIO19/20，UART0 TX GPIO43 / RX GPIO44。 */

@@ -1,7 +1,7 @@
 /*
  * Mach3 通信测试。原生 USB 模拟 XHC WHB04B-6（10CE:EB93）。
  * 日志走 UART0（GPIO43/44，板上 UART/COM 口），115200。
- * 原生 USB 口留给 Mach3。手轮增量默认是 0，短按 BOOT（GPIO0）才发一格 X。
+ * 原生 USB 口留给 Mach3。轴、倍率、拨轮和按键由手轮板发来。
  *
  *   idf.py set-target esp32s3
  *   idf.py -p COMx flash monitor
@@ -12,7 +12,6 @@
 #include <string.h>
 
 #include "class/hid/hid_device.h"
-#include "driver/gpio.h"
 #include "driver/rmt_encoder.h"
 #include "driver/rmt_tx.h"
 #include "esp_event.h"
@@ -29,7 +28,7 @@
 #define USB_VID 0x10CE
 #define USB_PID 0xEB93
 
-#define AXIS_X 0x11
+#define AXIS_OFF 0x06
 #define FEED_0_01 0x0E
 #define REPORT_IN 0x04
 #define REPORT_FEATURE 0x06
@@ -154,6 +153,13 @@ static bool link_ready;
 static uint8_t link_seq;
 static volatile uint32_t wheel_packets;
 static volatile uint32_t wheel_last_ms;
+static uint8_t in_axis = AXIS_OFF;
+static uint8_t in_step = FEED_0_01;
+static uint8_t in_btn;
+static int16_t wheel_last;
+static int32_t wheel_left;
+static bool wheel_seen;
+static portMUX_TYPE in_mux = portMUX_INITIALIZER_UNLOCKED;
 
 typedef struct __attribute__((packed)) {
     uint8_t magic0;
@@ -180,9 +186,22 @@ static void link_recv(const esp_now_recv_info_t *info, const uint8_t *data, int 
     if (data == NULL || len < 4) {
         return;
     }
-    if (data[0] != 0xA5 || data[1] != 0x5A || data[2] != 2) {
+    if (data[0] != 0xA5 || data[1] != 0x5A || data[2] != 2 || len < 9) {
         return;
     }
+    int16_t wheel = (int16_t)(data[7] | (data[8] << 8));
+    taskENTER_CRITICAL(&in_mux);
+    in_axis = data[4];
+    in_step = data[5];
+    in_btn = data[6];
+    if (!wheel_seen) {
+        wheel_last = wheel;
+        wheel_seen = true;
+    } else {
+        wheel_left += (int16_t)(wheel - wheel_last);
+        wheel_last = wheel;
+    }
+    taskEXIT_CRITICAL(&in_mux);
     wheel_packets++;
     wheel_last_ms = now_ms();
 }
@@ -357,18 +376,35 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
     consume_host_bytes(buffer, bufsize);
 }
 
-static void send_pendant_report(int8_t delta)
+static void send_pendant_report(void)
 {
     if (!tud_mounted() || !tud_hid_ready()) {
         return;
     }
+    uint8_t axis;
+    uint8_t step;
+    uint8_t btn;
+    int8_t delta = 0;
+    taskENTER_CRITICAL(&in_mux);
+    axis = in_axis;
+    step = in_step;
+    btn = in_btn;
+    if (wheel_left > 127) {
+        delta = 127;
+    } else if (wheel_left < -127) {
+        delta = -127;
+    } else {
+        delta = (int8_t)wheel_left;
+    }
+    wheel_left -= delta;
+    taskEXIT_CRITICAL(&in_mux);
     uint8_t random_byte = (uint8_t)(esp_random() & 0xFF);
     uint8_t packet[7] = {
         random_byte,
+        btn,
         0x00,
-        0x00,
-        FEED_0_01,
-        AXIS_X,
+        step,
+        axis,
         (uint8_t)delta,
         (uint8_t)(random_byte & host_seed),
     };
@@ -379,15 +415,6 @@ static void send_pendant_report(int8_t delta)
 
 void app_main(void)
 {
-    const gpio_config_t boot = {
-        .pin_bit_mask = BIT64(GPIO_NUM_0),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    ESP_ERROR_CHECK(gpio_config(&boot));
-
     const tinyusb_config_t tusb_cfg = {
         .device_descriptor = &device_descriptor,
         .string_descriptor = hid_string_descriptor,
@@ -406,20 +433,11 @@ void app_main(void)
     link_start();
     ESP_LOGI(TAG, "USB %04X:%04X 已启动，等待 Mach3 回传坐标", USB_VID, USB_PID);
 
-    bool boot_was_down = false;
     TickType_t last_wait_log = xTaskGetTickCount();
     uint32_t loops = 0;
 
     while (1) {
-        int8_t delta = 0;
-        bool boot_down = gpio_get_level(GPIO_NUM_0) == 0;
-        if (boot_down && !boot_was_down) {
-            delta = 1;
-            ESP_LOGW(TAG, "BOOT 按下，发送 X 轴 +1 格");
-        }
-        boot_was_down = boot_down;
-
-        send_pendant_report(delta);
+        send_pendant_report();
         loops++;
         if ((loops % 10) == 0) {
             link_send();

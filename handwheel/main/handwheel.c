@@ -207,7 +207,7 @@ static void inputs_start(void)
         PIN_ENC_A, PIN_ENC_B,
         PIN_SWA_1, PIN_SWA_2, PIN_SWA_3, PIN_SWA_4,
         PIN_SWB_1, PIN_SWB_2, PIN_SWB_3, PIN_SWB_4,
-        PIN_KEY1, PIN_KEY2, PIN_KEY3, PIN_KEY4, PIN_KEY5, PIN_KEY6,
+        PIN_KEY1, PIN_KEY2, PIN_KEY3, PIN_KEY4, PIN_KEY5, PIN_KEY6, PIN_KEY7, PIN_KEY8,
         PIN_ESTOP,
     };
     uint64_t mask = 0;
@@ -249,12 +249,69 @@ static void link_recv(const esp_now_recv_info_t *info, const uint8_t *data, int 
     taskEXIT_CRITICAL(&link_mux);
 }
 
-static void link_send_ping(void)
+static uint8_t ctrl_axis = 0x06;
+static uint8_t ctrl_step = 0x0D;
+static uint8_t ctrl_btn;
+static const char *ctrl_axis_name = "OFF";
+static const char *ctrl_step_name = "0.001";
+static const char *ctrl_btn_name = "----";
+
+static void read_controls(void)
+{
+    int axis = switch_pos(PIN_SWA_1, PIN_SWA_2, PIN_SWA_3, PIN_SWA_4);
+    static const uint8_t axis_code[] = {0x06, 0x06, 0x11, 0x12, 0x13};
+    static const char *axis_name[] = {"----", "OFF", "X", "Y", "Z"};
+    ctrl_axis = axis_code[axis];
+    ctrl_axis_name = axis_name[axis];
+
+    int step = switch_pos(PIN_SWB_1, PIN_SWB_2, PIN_SWB_3, PIN_SWB_4);
+    static const uint8_t step_code[] = {0x0E, 0x0D, 0x0E, 0x0F, 0x10};
+    static const char *step_name[] = {"----", "0.001", "0.01", "0.1", "1"};
+    ctrl_step = step_code[step];
+    ctrl_step_name = step_name[step];
+
+    static const struct {
+        int pin;
+        uint8_t code;
+        const char *name;
+    } keys[] = {
+        {PIN_KEY1, 0x01, "RESET"},
+        {PIN_KEY2, 0x02, "STOP"},
+        {PIN_KEY3, 0x03, "START"},
+        {PIN_KEY4, 0x04, "FEED+"},
+        {PIN_KEY5, 0x05, "FEED-"},
+        {PIN_KEY6, 0x06, "SPD+"},
+        {PIN_KEY7, 0x07, "SPD-"},
+        {PIN_KEY8, 0x08, "HOME"},
+    };
+    ctrl_btn = 0;
+    ctrl_btn_name = "----";
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        if (gpio_get_level(keys[i].pin) == 0) {
+            ctrl_btn = keys[i].code;
+            ctrl_btn_name = keys[i].name;
+            break;
+        }
+    }
+}
+
+static void link_send_controls(void)
 {
     if (!link_ready) {
         return;
     }
-    uint8_t pkt[4] = {0xA5, 0x5A, 2, link_seq++};
+    int16_t detents = (int16_t)(encoder / 4);
+    uint8_t pkt[9] = {
+        0xA5,
+        0x5A,
+        2,
+        link_seq++,
+        ctrl_axis,
+        ctrl_step,
+        ctrl_btn,
+        (uint8_t)detents,
+        (uint8_t)(detents >> 8),
+    };
     uint8_t mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     esp_now_send(mac, pkt, sizeof(pkt));
 }
@@ -373,10 +430,9 @@ void app_main(void)
 
     while (1) {
         poll_encoder();
+        read_controls();
+        link_send_controls();
         ticks++;
-        if (link_ready && (ticks % 25) == 0) {
-            link_send_ping();
-        }
         if ((ticks % 10) != 0) {
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
@@ -405,16 +461,7 @@ void app_main(void)
         }
         bool link_up = link_packets > 0 && (now_ms() - link_last_ms) < 1000;
 
-        int swa = switch_pos(PIN_SWA_1, PIN_SWA_2, PIN_SWA_3, PIN_SWA_4);
-        int swb = switch_pos(PIN_SWB_1, PIN_SWB_2, PIN_SWB_3, PIN_SWB_4);
         bool estop = gpio_get_level(PIN_ESTOP) != 0;
-        char keys[7];
-        const int key_pins[] = {PIN_KEY1, PIN_KEY2, PIN_KEY3, PIN_KEY4, PIN_KEY5, PIN_KEY6};
-        for (int i = 0; i < 6; i++) {
-            keys[i] = gpio_get_level(key_pins[i]) == 0 ? '1' + i : '-';
-        }
-        keys[6] = '\0';
-
         bool blink_on = ((ticks / 10) % 2) == 0;
         if (shown_link != (int)link_up) {
             status_bar(link_up);
@@ -424,31 +471,22 @@ void app_main(void)
         rgb_show(link_up, mach3_ok, blink_on);
 
         char row[12][20];
-        if (link_rssi < -120) {
-            snprintf(row[0], sizeof(row[0]), "PKT %lu", (unsigned long)link_packets);
-        } else {
-            snprintf(row[0], sizeof(row[0]), "P%lu R%d", (unsigned long)link_packets, link_rssi);
-        }
-        snprintf(row[1], sizeof(row[1]), "MACH3 %s", mach3_ok ? "YES" : "NO");
-        snprintf(row[2], sizeof(row[2]), "X %+9.4f", coord_x);
-        snprintf(row[3], sizeof(row[3]), "Y %+9.4f", coord_y);
-        snprintf(row[4], sizeof(row[4]), "Z %+9.4f", coord_z);
-        snprintf(row[5], sizeof(row[5]), "F %-5d S %-5d", feed, spindle);
-        snprintf(row[6], sizeof(row[6]), "ESTOP %s", estop ? "OPEN" : "OK");
-        snprintf(row[7], sizeof(row[7]), "ENC %ld", (long)encoder);
-        snprintf(row[8], sizeof(row[8]), "SWA %d", swa);
-        snprintf(row[9], sizeof(row[9]), "SWB %d", swb);
-        snprintf(row[10], sizeof(row[10]), "KEY %s", keys);
+        snprintf(row[0], sizeof(row[0]), "X %+9.4f", coord_x);
+        snprintf(row[1], sizeof(row[1]), "Y %+9.4f", coord_y);
+        snprintf(row[2], sizeof(row[2]), "Z %+9.4f", coord_z);
+        snprintf(row[3], sizeof(row[3]), "F %-5d S %-5d", feed, spindle);
+        snprintf(row[4], sizeof(row[4]), "AXIS %s", ctrl_axis_name);
+        snprintf(row[5], sizeof(row[5]), "STEP %s", ctrl_step_name);
+        snprintf(row[6], sizeof(row[6]), "BTN %s", ctrl_btn_name);
+        snprintf(row[7], sizeof(row[7]), "ESTOP %s", estop ? "OPEN" : "OK");
 
         const uint16_t color[12] = {
-            link_up ? 0x07E0 : 0xF800,
-            mach3_ok ? 0x07E0 : 0xFFE0,
             0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF,
+            0x07FF, 0x07FF, ctrl_btn ? 0xFFE0 : 0xFFFF,
             estop ? 0xF800 : 0x07E0,
-            0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF,
         };
-        const int ypos[12] = {40, 64, 96, 120, 144, 168, 200, 224, 248, 272, 296};
-        for (int i = 0; i < 11; i++) {
+        const int ypos[12] = {40, 64, 88, 112, 144, 168, 192, 224};
+        for (int i = 0; i < 8; i++) {
             if (strcmp(prev[i], row[i]) != 0) {
                 show(ypos[i], row[i], color[i]);
                 snprintf(prev[i], sizeof(prev[i]), "%s", row[i]);
