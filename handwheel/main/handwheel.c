@@ -89,49 +89,109 @@ static void lcd_fill(uint16_t color)
     for (int y = 0; y < LCD_H; y++) {
         esp_lcd_panel_draw_bitmap(panel, 0, y, LCD_W, y + 1, line_buf);
     }
+    lcd_flush();
 }
 
-static void draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg, int scale)
+static void fill_rect(int x, int y, int w, int h, uint16_t color)
 {
-    lcd_flush();
-    const int tw = (int)strlen(text) * 8 * scale;
-    const int th = 8 * scale;
-    if (tw <= 0 || x >= LCD_W || y >= LCD_H) {
+    if (x < 0) {
+        w += x;
+        x = 0;
+    }
+    if (y < 0) {
+        h += y;
+        y = 0;
+    }
+    if (x >= LCD_W || y >= LCD_H || w <= 0 || h <= 0) {
         return;
     }
-    int width = tw;
-    if (x + width > LCD_W) {
-        width = LCD_W - x;
+    if (x + w > LCD_W) {
+        w = LCD_W - x;
     }
-    for (int i = 0; i < width * th; i++) {
+    if (y + h > LCD_H) {
+        h = LCD_H - y;
+    }
+    for (int i = 0; i < w; i++) {
+        line_buf[i] = color;
+    }
+    lcd_flush();
+    for (int row = 0; row < h; row++) {
+        esp_lcd_panel_draw_bitmap(panel, x, y + row, x + w, y + row + 1, line_buf);
+    }
+    lcd_flush();
+}
+
+static void fit_text(char *dst, int cols, const char *src, bool center)
+{
+    int n = 0;
+    while (src[n] != '\0' && n < cols) {
+        n++;
+    }
+    int left = center ? (cols - n) / 2 : 0;
+    for (int i = 0; i < cols; i++) {
+        dst[i] = ' ';
+    }
+    for (int i = 0; i < n; i++) {
+        dst[left + i] = src[i];
+    }
+    dst[cols] = '\0';
+}
+
+static void draw_glyphs(int x, int y, const char *text, int cols, int cw, int ch,
+                        uint16_t fg, uint16_t bg)
+{
+    const int width = cols * cw;
+    if (cols <= 0 || cw <= 0 || ch <= 0 || ch > 32 || width > LCD_W) {
+        return;
+    }
+    lcd_flush();
+    for (int i = 0; i < width * ch; i++) {
         line_buf[i] = bg;
     }
-    for (int n = 0; text[n] != '\0'; n++) {
-        unsigned char ch = (unsigned char)text[n];
-        if (ch > 127) {
-            ch = ' ';
+    for (int n = 0; n < cols; n++) {
+        unsigned char chv = (unsigned char)text[n];
+        if (chv > 127) {
+            chv = ' ';
         }
-        const uint8_t *glyph = (const uint8_t *)font8x8_basic[ch];
+        const uint8_t *glyph = (const uint8_t *)font8x8_basic[chv];
         for (int row = 0; row < 8; row++) {
             uint8_t bits = glyph[row];
+            int y0 = row * ch / 8;
+            int y1 = (row + 1) * ch / 8;
             for (int col = 0; col < 8; col++) {
                 if ((bits & (0x01 << col)) == 0) {
                     continue;
                 }
-                for (int sy = 0; sy < scale; sy++) {
-                    for (int sx = 0; sx < scale; sx++) {
-                        int px = n * 8 * scale + col * scale + sx;
-                        int py = row * scale + sy;
-                        if (x + px < LCD_W && px < width) {
-                            line_buf[py * width + px] = fg;
-                        }
+                int x0 = col * cw / 8;
+                int x1 = (col + 1) * cw / 8;
+                for (int py = y0; py < y1; py++) {
+                    for (int px = x0; px < x1; px++) {
+                        line_buf[py * width + n * cw + px] = fg;
                     }
                 }
             }
         }
     }
-    esp_lcd_panel_draw_bitmap(panel, x, y, x + width, y + th, line_buf);
+    esp_lcd_panel_draw_bitmap(panel, x, y, x + width, y + ch, line_buf);
     lcd_flush();
+}
+
+static void draw_band(int y, int h, const char *text, int cols, int cw, int ch,
+                      uint16_t fg, uint16_t bg, bool center)
+{
+    char fitted[16];
+    if (cols > 15) {
+        cols = 15;
+    }
+    fit_text(fitted, cols, text, center);
+    fill_rect(0, y, LCD_W, h, bg);
+    int width = cols * cw;
+    int x = (LCD_W - width) / 2;
+    int ty = y + (h - ch) / 2;
+    if (ty < y) {
+        ty = y;
+    }
+    draw_glyphs(x, ty, fitted, cols, cw, ch, fg, bg);
 }
 
 static void lcd_start(void)
@@ -394,24 +454,15 @@ static void status_bar(bool up)
 {
     uint16_t bg = up ? 0x07E0 : 0xF800;
     uint16_t fg = up ? 0x0000 : 0xFFFF;
-    const char *text = up ? "LINK OK" : "NO LINK";
-    const int scale = 3;
-    int tw = (int)strlen(text) * 8 * scale;
-    int x = (LCD_W - tw) / 2;
-    lcd_flush();
-    for (int i = 0; i < LCD_W * 32; i++) {
-        line_buf[i] = bg;
-    }
-    esp_lcd_panel_draw_bitmap(panel, 0, 0, LCD_W, 32, line_buf);
-    lcd_flush();
-    draw_text(x, 4, text, fg, bg, scale);
+    draw_band(0, 44, up ? "LINK OK" : "NO LINK", 7, 32, 32, fg, bg, true);
 }
 
-static void show(int y, const char *text, uint16_t fg)
+static void fmt_coord(char *dst, size_t n, char axis, float v)
 {
-    char padded[16];
-    snprintf(padded, sizeof(padded), "%-15.15s", text);
-    draw_text(0, y, padded, fg, 0x0000, 2);
+    int len = snprintf(dst, n, "%c%+14.4f", axis, v);
+    if (len < 0 || len > 15) {
+        snprintf(dst, n, "%c%+14.0f", axis, v);
+    }
 }
 
 void app_main(void)
@@ -423,7 +474,7 @@ void app_main(void)
     link_start();
     ESP_LOGI(TAG, "屏幕已初始化 %dx%d", LCD_W, LCD_H);
 
-    char prev[14][20];
+    char prev[8][24];
     memset(prev, 0, sizeof(prev));
     int shown_link = -1;
     uint32_t ticks = 0;
@@ -470,26 +521,35 @@ void app_main(void)
         }
         rgb_show(link_up, mach3_ok, blink_on);
 
-        char row[12][20];
-        snprintf(row[0], sizeof(row[0]), "X %+9.4f", coord_x);
-        snprintf(row[1], sizeof(row[1]), "Y %+9.4f", coord_y);
-        snprintf(row[2], sizeof(row[2]), "Z %+9.4f", coord_z);
-        snprintf(row[3], sizeof(row[3]), "F %-5d S %-5d", feed, spindle);
+        char row[8][24];
+        fmt_coord(row[0], sizeof(row[0]), 'X', coord_x);
+        fmt_coord(row[1], sizeof(row[1]), 'Y', coord_y);
+        fmt_coord(row[2], sizeof(row[2]), 'Z', coord_z);
+        snprintf(row[3], sizeof(row[3]), "F%6d S%6d", feed, spindle);
         snprintf(row[4], sizeof(row[4]), "AXIS %s", ctrl_axis_name);
         snprintf(row[5], sizeof(row[5]), "STEP %s", ctrl_step_name);
         snprintf(row[6], sizeof(row[6]), "BTN %s", ctrl_btn_name);
         snprintf(row[7], sizeof(row[7]), "ESTOP %s", estop ? "OPEN" : "OK");
 
-        const uint16_t color[12] = {
+        const uint16_t color[8] = {
             0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF,
             0x07FF, 0x07FF, ctrl_btn ? 0xFFE0 : 0xFFFF,
             estop ? 0xF800 : 0x07E0,
         };
-        const int ypos[12] = {40, 64, 88, 112, 144, 168, 192, 224};
+        /* 44 + 36*3 + 32 + 34*4 = 320. 字宽按列数铺满 240. */
+        static const int band_y[8] = {44, 80, 116, 152, 184, 218, 252, 286};
+        static const int band_h[8] = {36, 36, 36, 32, 34, 34, 34, 34};
+        static const int band_cols[8] = {15, 15, 15, 15, 10, 10, 10, 10};
+        static const int band_cw[8] = {16, 16, 16, 16, 24, 24, 24, 24};
+        static const int band_ch[8] = {24, 24, 24, 16, 24, 24, 24, 24};
+        static const bool band_center[8] = {false, false, false, false, true, true, true, true};
+        static uint16_t prev_fg[8];
         for (int i = 0; i < 8; i++) {
-            if (strcmp(prev[i], row[i]) != 0) {
-                show(ypos[i], row[i], color[i]);
+            if (strcmp(prev[i], row[i]) != 0 || prev_fg[i] != color[i]) {
+                draw_band(band_y[i], band_h[i], row[i], band_cols[i], band_cw[i], band_ch[i],
+                          color[i], 0x0000, band_center[i]);
                 snprintf(prev[i], sizeof(prev[i]), "%s", row[i]);
+                prev_fg[i] = color[i];
             }
         }
 
