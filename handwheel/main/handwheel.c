@@ -15,9 +15,14 @@
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_st7789.h"
+#include "esp_event.h"
 #include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_now.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs_flash.h"
 #include "pins.h"
 
 #include "../font8x8_basic.h"
@@ -26,8 +31,34 @@
 #define LCD_H 320
 #define TAG "handwheel"
 
+#define LINK_CHANNEL 6
+
 static esp_lcd_panel_handle_t panel;
-static uint16_t line_buf[LCD_W * 16];
+static uint16_t line_buf[LCD_W * 32];
+static bool link_ready;
+static uint8_t link_seq;
+static int8_t link_rssi = -127;
+static uint32_t link_packets;
+static uint32_t link_last_ms;
+static bool mach3_ok;
+static portMUX_TYPE link_mux = portMUX_INITIALIZER_UNLOCKED;
+
+typedef struct __attribute__((packed)) {
+    uint8_t magic0;
+    uint8_t magic1;
+    uint8_t type;
+    uint8_t seq;
+    uint8_t has_coord;
+    uint8_t flags;
+    int32_t x;
+    int32_t y;
+    int32_t z;
+    uint16_t feed;
+    uint16_t spindle;
+} link_pkt_t;
+
+static link_pkt_t link_rx;
+static volatile bool link_rx_new;
 
 static float coord_x, coord_y, coord_z;
 static int feed, spindle;
@@ -50,9 +81,8 @@ static void lcd_fill(uint16_t color)
     }
 }
 
-static void draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg)
+static void draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg, int scale)
 {
-    const int scale = 2;
     const int tw = (int)strlen(text) * 8 * scale;
     const int th = 8 * scale;
     if (tw <= 0 || x >= LCD_W || y >= LCD_H) {
@@ -184,11 +214,95 @@ static void inputs_start(void)
     enc_prev = (uint8_t)((gpio_get_level(PIN_ENC_A) << 1) | gpio_get_level(PIN_ENC_B));
 }
 
+static uint32_t now_ms(void)
+{
+    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
+
+static void link_recv(const esp_now_recv_info_t *info, const uint8_t *data, int len)
+{
+    if (data == NULL || len < (int)sizeof(link_pkt_t)) {
+        return;
+    }
+    if (data[0] != 0xA5 || data[1] != 0x5A || data[2] != 1) {
+        return;
+    }
+    link_pkt_t pkt;
+    memcpy(&pkt, data, sizeof(pkt));
+    taskENTER_CRITICAL(&link_mux);
+    link_rx = pkt;
+    link_rx_new = true;
+    if (info != NULL && info->rx_ctrl != NULL) {
+        link_rssi = info->rx_ctrl->rssi;
+    }
+    taskEXIT_CRITICAL(&link_mux);
+}
+
+static void link_send_ping(void)
+{
+    if (!link_ready) {
+        return;
+    }
+    uint8_t pkt[4] = {0xA5, 0x5A, 2, link_seq++};
+    uint8_t mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    esp_now_send(mac, pkt, sizeof(pkt));
+}
+
+static void link_start(void)
+{
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs %s", esp_err_to_name(err));
+        return;
+    }
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_set_channel(LINK_CHANNEL, WIFI_SECOND_CHAN_NONE));
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+    ESP_ERROR_CHECK(esp_now_init());
+    ESP_ERROR_CHECK(esp_now_register_recv_cb(link_recv));
+    esp_now_peer_info_t peer = {0};
+    memset(peer.peer_addr, 0xFF, 6);
+    peer.channel = LINK_CHANNEL;
+    peer.ifidx = WIFI_IF_STA;
+    peer.encrypt = false;
+    ESP_ERROR_CHECK(esp_now_add_peer(&peer));
+    link_ready = true;
+    ESP_LOGI(TAG, "link channel %d", LINK_CHANNEL);
+}
+
+static void status_bar(bool up, bool blink_on)
+{
+    uint16_t bg = up ? 0x07E0 : (blink_on ? 0xF800 : 0x0000);
+    uint16_t fg = up ? 0x0000 : 0xFFFF;
+    const char *text = up ? "LINK OK" : "NO LINK";
+    const int scale = 3;
+    int tw = (int)strlen(text) * 8 * scale;
+    int x = (LCD_W - tw) / 2;
+    for (int i = 0; i < LCD_W; i++) {
+        line_buf[i] = bg;
+    }
+    for (int row = 0; row < 32; row++) {
+        esp_lcd_panel_draw_bitmap(panel, 0, row, LCD_W, row + 1, line_buf);
+    }
+    draw_text(x, 4, text, fg, bg, scale);
+}
+
 static void show(int y, const char *text, uint16_t fg)
 {
     char padded[16];
     snprintf(padded, sizeof(padded), "%-15.15s", text);
-    draw_text(0, y, padded, fg, 0x0000);
+    draw_text(0, y, padded, fg, 0x0000, 2);
 }
 
 void app_main(void)
@@ -196,6 +310,7 @@ void app_main(void)
     ESP_LOGI(TAG, "手轮板启动，点亮背光并初始化 ST7789");
     inputs_start();
     lcd_start();
+    link_start();
     ESP_LOGI(TAG, "屏幕已初始化 %dx%d", LCD_W, LCD_H);
 
     char prev[14][20];
@@ -205,10 +320,36 @@ void app_main(void)
     while (1) {
         poll_encoder();
         ticks++;
+        if (link_ready && (ticks % 25) == 0) {
+            link_send_ping();
+        }
         if ((ticks % 10) != 0) {
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
+
+        link_pkt_t pkt;
+        bool got = false;
+        taskENTER_CRITICAL(&link_mux);
+        if (link_rx_new) {
+            pkt = link_rx;
+            link_rx_new = false;
+            got = true;
+        }
+        taskEXIT_CRITICAL(&link_mux);
+        if (got) {
+            link_packets++;
+            link_last_ms = now_ms();
+            mach3_ok = pkt.has_coord != 0;
+            if (mach3_ok) {
+                coord_x = pkt.x / 10000.0f;
+                coord_y = pkt.y / 10000.0f;
+                coord_z = pkt.z / 10000.0f;
+                feed = pkt.feed;
+                spindle = pkt.spindle;
+            }
+        }
+        bool link_up = link_packets > 0 && (now_ms() - link_last_ms) < 1000;
 
         int swa = switch_pos(PIN_SWA_1, PIN_SWA_2, PIN_SWA_3, PIN_SWA_4);
         int swb = switch_pos(PIN_SWB_1, PIN_SWB_2, PIN_SWB_3, PIN_SWB_4);
@@ -220,26 +361,34 @@ void app_main(void)
         }
         keys[6] = '\0';
 
-        char row[14][20];
-        snprintf(row[0], sizeof(row[0]), "HANDWHEEL");
-        snprintf(row[1], sizeof(row[1]), "X %+9.4f", coord_x);
-        snprintf(row[2], sizeof(row[2]), "Y %+9.4f", coord_y);
-        snprintf(row[3], sizeof(row[3]), "Z %+9.4f", coord_z);
-        snprintf(row[4], sizeof(row[4]), "F %-5d S %-5d", feed, spindle);
-        snprintf(row[5], sizeof(row[5]), "LINK NONE");
+        status_bar(link_up, ((ticks / 10) % 2) == 0);
+
+        char row[12][20];
+        if (link_rssi < -120) {
+            snprintf(row[0], sizeof(row[0]), "PKT %lu", (unsigned long)link_packets);
+        } else {
+            snprintf(row[0], sizeof(row[0]), "P%lu R%d", (unsigned long)link_packets, link_rssi);
+        }
+        snprintf(row[1], sizeof(row[1]), "MACH3 %s", mach3_ok ? "YES" : "NO");
+        snprintf(row[2], sizeof(row[2]), "X %+9.4f", coord_x);
+        snprintf(row[3], sizeof(row[3]), "Y %+9.4f", coord_y);
+        snprintf(row[4], sizeof(row[4]), "Z %+9.4f", coord_z);
+        snprintf(row[5], sizeof(row[5]), "F %-5d S %-5d", feed, spindle);
         snprintf(row[6], sizeof(row[6]), "ESTOP %s", estop ? "OPEN" : "OK");
         snprintf(row[7], sizeof(row[7]), "ENC %ld", (long)encoder);
         snprintf(row[8], sizeof(row[8]), "SWA %d", swa);
         snprintf(row[9], sizeof(row[9]), "SWB %d", swb);
         snprintf(row[10], sizeof(row[10]), "KEY %s", keys);
-        snprintf(row[11], sizeof(row[11]), "RUN %lu", (unsigned long)(ticks / 10));
 
-        const uint16_t color[14] = {
-            0x07FF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFE0,
-            estop ? 0xF800 : 0x07E0, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x07FF,
+        const uint16_t color[12] = {
+            link_up ? 0x07E0 : 0xF800,
+            mach3_ok ? 0x07E0 : 0xFFE0,
+            0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF,
+            estop ? 0xF800 : 0x07E0,
+            0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF,
         };
-        const int ypos[14] = {8, 36, 60, 84, 108, 140, 164, 188, 212, 236, 260, 292};
-        for (int i = 0; i < 12; i++) {
+        const int ypos[12] = {40, 64, 96, 120, 144, 168, 200, 224, 248, 272, 296};
+        for (int i = 0; i < 11; i++) {
             if (strcmp(prev[i], row[i]) != 0) {
                 show(ypos[i], row[i], color[i]);
                 snprintf(prev[i], sizeof(prev[i]), "%s", row[i]);
@@ -247,9 +396,9 @@ void app_main(void)
         }
 
         if ((ticks % 50) == 0) {
-            ESP_LOGI(TAG, "X %.4f Y %.4f Z %.4f F %d S %d  ENC %ld  SWA %d SWB %d  KEY %s  ESTOP %s",
-                     coord_x, coord_y, coord_z, feed, spindle, (long)encoder, swa, swb, keys,
-                     estop ? "开路" : "闭合");
+            ESP_LOGI(TAG, "%s pkts %lu rssi %d mach3 %s  X %.4f Y %.4f Z %.4f",
+                     link_up ? "LINK OK" : "NO LINK", (unsigned long)link_packets, link_rssi,
+                     mach3_ok ? "YES" : "NO", coord_x, coord_y, coord_z);
         }
         vTaskDelay(pdMS_TO_TICKS(20));
     }

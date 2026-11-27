@@ -1,7 +1,9 @@
 usb_dongle/build/
 usb_dongle/managed_components/
+usb_dongle/.pio/
 usb_dongle/sdkconfig
-usb_dongle/sdkconfig.old
+usb_dongle/sdkconfig.*
+!usb_dongle/sdkconfig.defaults
 handwheel/.pio/
 handwheel/build/
 handwheel/sdkconfig

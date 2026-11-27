@@ -13,10 +13,15 @@
 
 #include "class/hid/hid_device.h"
 #include "driver/gpio.h"
+#include "esp_event.h"
 #include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_now.h"
 #include "esp_random.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs_flash.h"
 #include "tinyusb.h"
 
 #define USB_VID 0x10CE
@@ -99,6 +104,99 @@ static uint32_t reports_sent;
 static float last_x, last_y, last_z;
 static uint16_t last_feed, last_spindle;
 static bool have_last;
+
+#define LINK_CHANNEL 6
+static bool link_ready;
+static uint8_t link_seq;
+static volatile uint32_t wheel_packets;
+static volatile uint32_t wheel_last_ms;
+
+typedef struct __attribute__((packed)) {
+    uint8_t magic0;
+    uint8_t magic1;
+    uint8_t type;
+    uint8_t seq;
+    uint8_t has_coord;
+    uint8_t flags;
+    int32_t x;
+    int32_t y;
+    int32_t z;
+    uint16_t feed;
+    uint16_t spindle;
+} link_pkt_t;
+
+static uint32_t now_ms(void)
+{
+    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
+
+static void link_recv(const esp_now_recv_info_t *info, const uint8_t *data, int len)
+{
+    (void)info;
+    if (data == NULL || len < 4) {
+        return;
+    }
+    if (data[0] != 0xA5 || data[1] != 0x5A || data[2] != 2) {
+        return;
+    }
+    wheel_packets++;
+    wheel_last_ms = now_ms();
+}
+
+static void link_send(void)
+{
+    if (!link_ready) {
+        return;
+    }
+    link_pkt_t pkt = {
+        .magic0 = 0xA5,
+        .magic1 = 0x5A,
+        .type = 1,
+        .seq = link_seq++,
+        .has_coord = have_last ? 1 : 0,
+        .flags = 0,
+        .x = (int32_t)(last_x * 10000.0f),
+        .y = (int32_t)(last_y * 10000.0f),
+        .z = (int32_t)(last_z * 10000.0f),
+        .feed = last_feed,
+        .spindle = last_spindle,
+    };
+    uint8_t mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    esp_now_send(mac, (const uint8_t *)&pkt, sizeof(pkt));
+}
+
+static void link_start(void)
+{
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs %s", esp_err_to_name(err));
+        return;
+    }
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_set_channel(LINK_CHANNEL, WIFI_SECOND_CHAN_NONE));
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+    ESP_ERROR_CHECK(esp_now_init());
+    ESP_ERROR_CHECK(esp_now_register_recv_cb(link_recv));
+    esp_now_peer_info_t peer = {0};
+    memset(peer.peer_addr, 0xFF, 6);
+    peer.channel = LINK_CHANNEL;
+    peer.ifidx = WIFI_IF_STA;
+    peer.encrypt = false;
+    ESP_ERROR_CHECK(esp_now_add_peer(&peer));
+    link_ready = true;
+    ESP_LOGI(TAG, "link channel %d", LINK_CHANNEL);
+}
 
 static float coordinate(const uint8_t *p)
 {
@@ -260,10 +358,12 @@ void app_main(void)
 #endif
     };
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
+    link_start();
     ESP_LOGI(TAG, "USB %04X:%04X 已启动，等待 Mach3 回传坐标", USB_VID, USB_PID);
 
     bool boot_was_down = false;
     TickType_t last_wait_log = xTaskGetTickCount();
+    uint32_t loops = 0;
 
     while (1) {
         int8_t delta = 0;
@@ -275,6 +375,15 @@ void app_main(void)
         boot_was_down = boot_down;
 
         send_pendant_report(delta);
+        loops++;
+        if ((loops % 10) == 0) {
+            link_send();
+        }
+        if ((loops % 50) == 0) {
+            bool wheel_up = wheel_packets > 0 && (now_ms() - wheel_last_ms) < 1000;
+            ESP_LOGI(TAG, "%s pkts %lu", wheel_up ? "WHEEL LINK OK" : "WHEEL NO LINK",
+                     (unsigned long)wheel_packets);
+        }
 
         if (frame_count == 0 && (xTaskGetTickCount() - last_wait_log) > pdMS_TO_TICKS(2000)) {
             last_wait_log = xTaskGetTickCount();
